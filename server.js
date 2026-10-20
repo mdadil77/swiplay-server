@@ -388,7 +388,7 @@ io.on('connection', (socket) => {
       const realPlayer = Array.from(Store.players.values()).find(rp => rp.userId === p.userId);
       if (realPlayer && !realPlayer.isGuest && p.score > 0) {
         Store.leaderboard.swipe.today.push({
-          name: realPlayer.name, avatar: realPlayer.avatar, gender: realPlayer.gender, score: p.score, time: Date.now()
+          name: realPlayer.name, avatar: realPlayer.avatar,avatarType: realPlayer.avatarType, gender: realPlayer.gender, score: p.score, time: Date.now()
         });
         updatedLb = true;
       }
