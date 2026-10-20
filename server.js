@@ -129,7 +129,7 @@ io.on('connection', (socket) => {
       };
 
       Store.chatHistory.push(msg);
-      if (Store.chatHistory.length > 50) Store.chatHistory.shift();
+      if (Store.chatHistory.length > 100) Store.chatHistory.shift();
 
       io.emit('chat:message', msg);
     } catch (e) { console.error("Chat error", e); }
