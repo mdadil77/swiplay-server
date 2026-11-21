@@ -109,6 +109,12 @@ io.on('connection', (socket) => {
     broadcastRoster();
   } catch (e) {}
 });
+  socket.on('chat:send', (text) => {
+  const p = Store.players.get(socket.id); if(!p) return;
+  const msg = { user: normProfile(p), text: sanitizeText(text, 200), time: Date.now() };
+  Store.chatHistory.push(msg); if(Store.chatHistory.length > 50) Store.chatHistory.shift();
+  io.emit('chat:message', msg);
+});
 
   
 
@@ -319,7 +325,6 @@ io.on('connection', (socket) => {
   });
 
   function endSwipeMatch(room) {
-    function endSwipeMatch(room) {
   if (room.status === 'ended') return;
   room.status = 'ended'; clearTimeout(room.endTimer);
 
@@ -328,6 +333,18 @@ io.on('connection', (socket) => {
     hits: p.hits, misses: p.misses,
     avgReaction: p.reactions.length ? Math.round(p.reactions.reduce((a, b) => a + b, 0) / p.reactions.length) : 0
   }));
+
+  room.players.forEach((p, i) => {
+    const live = Store.players.get(p.socketId);
+    recordSwipeScore(normProfile(live || { userId: p.userId, name: p.profile?.name, ...p.profile }), results[i].score);
+  });
+
+  let winnerId = null;
+  if (results.length === 2 && results[0].score !== results[1].score) {
+    winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
+  }
+  io.to(room.id).emit('match:end', { results, winnerId });
+}
 
   room.players.forEach((p, i) => {
     const live = Store.players.get(p.socketId);
