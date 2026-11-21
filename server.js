@@ -22,10 +22,39 @@ const Store = {
 };
 
 const sanitizeText = (txt, max) => String(txt || '').replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim().substring(0, max);
+const MAX_AVATAR_LEN = 12000; // ~9 KB of base64 — plenty for a 96px JPEG
+
+// Single shape for every profile that leaves the server.
+function normProfile(p, statusOverride) {
+  if (!p) return { id: 'unknown', userId: 'unknown', name: 'Player', avatar: '🤖', avatarType: 'emoji', gender: 'none', status: 'offline' };
+  const avatar = String(p.avatar || '🤖').substring(0, MAX_AVATAR_LEN);
+  const isPhoto = p.avatarType === 'photo' || avatar.startsWith('data:image/');
+  return {
+    id: p.userId || p.id,
+    userId: p.userId || p.id,
+    name: p.name || 'Player',
+    avatar,
+    avatarType: isPhoto ? 'photo' : 'emoji',
+    gender: p.gender || 'none',
+    status: statusOverride || p.status || 'online'
+  };
+}
 const generateRoomCode = () => { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:4}, () => c[Math.floor(Math.random()*c.length)]).join(''); };
 
 const getRoomForSocket = (socketId) => { for (const r of Store.rooms.values()) { if (r.players.some(p => p.socketId === socketId)) return r; } return null; };
-
+function broadcastRoster() {
+  const seen = new Set();
+  const list = [];
+  for (const p of Store.players.values()) {
+    const n = normProfile(p);
+    if (seen.has(n.userId)) continue;
+    seen.add(n.userId);
+    const room = getRoomForSocket(p.socketId);
+    n.status = (room && room.status === 'playing') ? 'in game' : 'online';
+    list.push(n);
+  }
+  io.emit('players:update', list);
+}
 // GAME CONSTANTS
 const DIRS = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
 const LUDO_TOTAL = 25;
@@ -33,23 +62,55 @@ const SNAKE_TOTAL = 64;
 const SNAKES = { 16: 6, 47: 26, 49: 11, 56: 53, 62: 19, 64: 60 };
 const LADDERS = { 1: 38, 4: 14, 9: 31, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 80: 100 };
 const WORDS = ['apple','banana','cherry','dragon','elephant','falcon','guitar','hunter','island','jacket','knight','lemon','monkey','ninja','ocean','pirate','queen','rabbit','snake','tiger','umbrella','vampire','wizard','xylophone','yacht','zebra','rocket','planet','cyber','magic'];
+function bucketKey(range) {
+  const d = new Date();
+  if (range === 'today') return d.toISOString().slice(0, 10);
+  if (range === 'week') {
+    const start = new Date(d.getFullYear(), 0, 1);
+    return `${d.getFullYear()}-W${Math.ceil((((d - start) / 86400000) + start.getDay() + 1) / 7)}`;
+  }
+  return 'all';
+}
 
+function recordSwipeScore(player, score) {
+  if (!score) return;
+  for (const range of ['today', 'week', 'all']) {
+    const arr = Store.leaderboard.swipe[range];
+    const key = bucketKey(range);
+    let entry = arr.find(e => e.userId === player.userId && e.key === key);
+    if (!entry) {
+      entry = { userId: player.userId, name: player.name, avatar: player.avatar, avatarType: player.avatarType, gender: player.gender, score: 0, key };
+      arr.push(entry);
+    }
+    entry.score = Math.max(entry.score, score);
+    entry.name = player.name;
+    arr.sort((a, b) => b.score - a.score);
+    if (arr.length > 100) arr.length = 100;
+  }
+  io.emit('leaderboard:update', Store.leaderboard);
+}
 io.on('connection', (socket) => {
   socket.on('hello', (profile) => {
-    try {
-      let { id, name, avatar, avatarType, gender } = profile;
-      name = sanitizeText(name, 14); if (name.length < 2) name = "Player";
-      Store.players.set(socket.id, { socketId: socket.id, userId: String(id), name, avatar, avatarType, gender, status: 'online' });
-      socket.emit('chat:history', Store.chatHistory);
-    } catch (e) {}
-  });
+  try {
+    let { id, name, avatar, avatarType, gender } = profile || {};
+    name = sanitizeText(name, 14); if (name.length < 2) name = "Player";
+    const avatarStr = String(avatar || '🤖').substring(0, MAX_AVATAR_LEN);
+    const type = avatarType === 'photo' || avatarStr.startsWith('data:image/') ? 'photo' : 'emoji';
 
-  socket.on('chat:send', (text) => {
-    const p = Store.players.get(socket.id); if(!p) return;
-    const msg = { user: { id: p.userId, name: p.name, avatar: p.avatar }, text: sanitizeText(text, 200), time: Date.now() };
-    Store.chatHistory.push(msg); if(Store.chatHistory.length>50) Store.chatHistory.shift();
-    io.emit('chat:message', msg);
-  });
+    Store.players.set(socket.id, {
+      socketId: socket.id,
+      userId: String(id),
+      name, avatar: avatarStr, avatarType: type,
+      gender: gender || 'none',
+      status: 'online'
+    });
+
+    socket.emit('chat:history', Store.chatHistory);
+    broadcastRoster();
+  } catch (e) {}
+});
+
+  
 
   // FIXED: Using room:enter to match the new Lobby
   socket.on('room:enter', ({ gameId, mode, code }) => {
@@ -107,7 +168,7 @@ io.on('connection', (socket) => {
       room.status = 'playing';
       const startAt = Date.now() + 3000;
       const profiles = room.players.map(x => ({ userId: x.userId, profile: x.profile }));
-      
+      broadcastRoster();
       if (room.gameId === 'chess') {
         if(!room.chess) { room.chess = new Chess(); room.players[0].color = 'w'; room.players[1].color = 'b'; }
         profiles.forEach(pr => pr.color = room.players.find(x=>x.userId===pr.userId).color);
@@ -258,9 +319,27 @@ io.on('connection', (socket) => {
   });
 
   function endSwipeMatch(room) {
-    if (room.status === 'ended') return;
-    room.status = 'ended'; clearTimeout(room.endTimer);
-    const results = room.players.map(p => ({ userId: p.userId, score: p.score, bestCombo: p.bestCombo, hits: p.hits, misses: p.misses, avgReaction: p.reactions.length ? Math.round(p.reactions.reduce((a,b)=>a+b,0)/p.reactions.length) : 0 }));
+    function endSwipeMatch(room) {
+  if (room.status === 'ended') return;
+  room.status = 'ended'; clearTimeout(room.endTimer);
+
+  const results = room.players.map(p => ({
+    userId: p.userId, score: p.score, bestCombo: p.bestCombo,
+    hits: p.hits, misses: p.misses,
+    avgReaction: p.reactions.length ? Math.round(p.reactions.reduce((a, b) => a + b, 0) / p.reactions.length) : 0
+  }));
+
+  room.players.forEach((p, i) => {
+    const live = Store.players.get(p.socketId);
+    recordSwipeScore(normProfile(live || { userId: p.userId, name: p.profile?.name, ...p.profile }), results[i].score);
+  });
+
+  let winnerId = null;
+  if (results.length === 2 && results[0].score !== results[1].score) {
+    winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
+  }
+  io.to(room.id).emit('match:end', { results, winnerId });
+}
     let winnerId = null; if (results.length === 2 && results[0].score !== results[1].score) winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
     io.to(room.id).emit('match:end', { results, winnerId });
   }
@@ -299,6 +378,7 @@ io.on('connection', (socket) => {
       }
     }
     Store.players.delete(socket.id);
+    broadcastRoster();
   });
 });
 
