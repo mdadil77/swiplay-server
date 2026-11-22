@@ -467,23 +467,30 @@ io.on('connection', (socket) => {
       winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
     }
     io.to(room.id).emit('match:end', { results, winnerId });
-    setTimeout(() => Store.rooms.delete(room.id), 300000);
-    room.players.forEach(p => {
-      const s = io.sockets.sockets.get(p.socketId);
-      if (s) s.leave(room.id);
-    });
+    clearTimeout(room.cleanupTimer);
+    room.cleanupTimer = setTimeout(() => {
+      if (room.status !== 'ended') return;
+      room.players.forEach(p => {
+        const s = io.sockets.sockets.get(p.socketId);
+        if (s) s.leave(room.id);
+      });
+      Store.rooms.delete(room.id);
+    }, 300000);
   }
 
   function endChess(room, winColor, reason) {
     room.status = 'ended'; clearInterval(room.endTimer);
     const winner = room.players.find(p => p.color === winColor);
     io.to(room.id).emit('match:end', { winnerId: winner ? winner.userId : null, reason });
-    setTimeout(() => Store.rooms.delete(room.id), 300000);
-        // Inside endChess()
-    room.players.forEach(p => {
-      const s = io.sockets.sockets.get(p.socketId);
-      if (s) s.leave(room.id);
-    });
+    clearTimeout(room.cleanupTimer);
+    room.cleanupTimer = setTimeout(() => {
+      if (room.status !== 'ended') return;
+      room.players.forEach(p => {
+        const s = io.sockets.sockets.get(p.socketId);
+        if (s) s.leave(room.id);
+      });
+      Store.rooms.delete(room.id);
+    }, 300000);
   }
 
   function endWord(room) {
