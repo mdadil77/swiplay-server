@@ -104,6 +104,75 @@ io.on('connection', (socket) => {
       gender: gender || 'none',
       status: 'online'
     });
+    // --- GLOBAL CHAT (Send, 5-Min Edit, React, Reply) ---
+  socket.on('chat:send', (payload) => {
+    const p = Store.players.get(socket.id);
+    if (!p) return;
+    const rawText = typeof payload === 'string' ? payload : payload?.text;
+    const text = sanitizeText(rawText, 200);
+    if (!text) return;
+
+    let replyTo = null;
+    if (payload && typeof payload === 'object' && payload.replyToId) {
+      const target = Store.chatHistory.find(m => m.id === payload.replyToId);
+      if (target) {
+        replyTo = {
+          id: target.id,
+          name: target.user.name,
+          text: target.text.substring(0, 60)
+        };
+      }
+    }
+
+    const msg = {
+      id: crypto.randomUUID(),
+      user: normProfile(p),
+      text,
+      time: Date.now(),
+      edited: false,
+      replyTo,
+      reactions: {} // { '🔥': ['user_1', 'user_2'] }
+    };
+
+    Store.chatHistory.push(msg);
+    if (Store.chatHistory.length > 50) Store.chatHistory.shift();
+    io.emit('chat:message', msg);
+  });
+
+  socket.on('chat:edit', ({ id, text }) => {
+    const p = Store.players.get(socket.id);
+    if (!p) return;
+    const msg = Store.chatHistory.find(m => m.id === id);
+    if (!msg || msg.user.id !== p.userId) return;
+
+    // Enforce 5-minute (300,000 ms) edit limit on the server
+    if (Date.now() - msg.time > 300000) {
+      return socket.emit('error:toast', 'Messages can only be edited within 5 minutes.');
+    }
+
+    const clean = sanitizeText(text, 200);
+    if (!clean) return;
+    msg.text = clean;
+    msg.edited = true;
+    io.emit('chat:updated', msg);
+  });
+
+  socket.on('chat:react', ({ id, emoji }) => {
+    const p = Store.players.get(socket.id);
+    if (!p || !emoji) return;
+    const msg = Store.chatHistory.find(m => m.id === id);
+    if (!msg) return;
+
+    const cleanEmoji = String(emoji).substring(0, 4);
+    if (!msg.reactions[cleanEmoji]) msg.reactions[cleanEmoji] = [];
+
+    const idx = msg.reactions[cleanEmoji].indexOf(p.userId);
+    if (idx === -1) msg.reactions[cleanEmoji].push(p.userId); // Add reaction
+    else msg.reactions[cleanEmoji].splice(idx, 1);             // Toggle off
+
+    if (msg.reactions[cleanEmoji].length === 0) delete msg.reactions[cleanEmoji];
+    io.emit('chat:updated', msg);
+  });
 
     socket.emit('chat:history', Store.chatHistory);
     broadcastRoster();
