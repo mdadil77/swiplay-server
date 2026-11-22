@@ -91,20 +91,27 @@ function recordSwipeScore(player, score) {
 }
 io.on('connection', (socket) => {
   socket.on('hello', (profile) => {
-  try {
-    let { id, name, avatar, avatarType, gender } = profile || {};
-    name = sanitizeText(name, 14); if (name.length < 2) name = "Player";
-    const avatarStr = String(avatar || '🤖').substring(0, MAX_AVATAR_LEN);
-    const type = avatarType === 'photo' || avatarStr.startsWith('data:image/') ? 'photo' : 'emoji';
+    try {
+      let { id, name, avatar, avatarType, gender } = profile || {};
+      name = sanitizeText(name, 14); 
+      if (name.length < 2) name = "Player";
+      const avatarStr = String(avatar || '🤖').substring(0, MAX_AVATAR_LEN);
+      const type = avatarType === 'photo' || avatarStr.startsWith('data:image/') ? 'photo' : 'emoji';
 
-    Store.players.set(socket.id, {
-      socketId: socket.id,
-      userId: String(id),
-      name, avatar: avatarStr, avatarType: type,
-      gender: gender || 'none',
-      status: 'online'
-    });
-    // --- GLOBAL CHAT (Send, 5-Min Edit, React, Reply) ---
+      Store.players.set(socket.id, {
+        socketId: socket.id,
+        userId: String(id),
+        name, avatar: avatarStr, avatarType: type,
+        gender: gender || 'none',
+        status: 'online'
+      });
+      
+      socket.emit('chat:history', Store.chatHistory);
+      broadcastRoster();
+    } catch (e) {}
+  });
+
+  // --- GLOBAL CHAT (Send, 5-Min Edit, React, Reply) ---
   socket.on('chat:send', (payload) => {
     const p = Store.players.get(socket.id);
     if (!p) return;
@@ -131,7 +138,7 @@ io.on('connection', (socket) => {
       time: Date.now(),
       edited: false,
       replyTo,
-      reactions: {} // { '🔥': ['user_1', 'user_2'] }
+      reactions: {}
     };
 
     Store.chatHistory.push(msg);
@@ -145,7 +152,6 @@ io.on('connection', (socket) => {
     const msg = Store.chatHistory.find(m => m.id === id);
     if (!msg || msg.user.id !== p.userId) return;
 
-    // Enforce 5-minute (300,000 ms) edit limit on the server
     if (Date.now() - msg.time > 300000) {
       return socket.emit('error:toast', 'Messages can only be edited within 5 minutes.');
     }
@@ -167,27 +173,14 @@ io.on('connection', (socket) => {
     if (!msg.reactions[cleanEmoji]) msg.reactions[cleanEmoji] = [];
 
     const idx = msg.reactions[cleanEmoji].indexOf(p.userId);
-    if (idx === -1) msg.reactions[cleanEmoji].push(p.userId); // Add reaction
-    else msg.reactions[cleanEmoji].splice(idx, 1);             // Toggle off
+    if (idx === -1) msg.reactions[cleanEmoji].push(p.userId);
+    else msg.reactions[cleanEmoji].splice(idx, 1);
 
     if (msg.reactions[cleanEmoji].length === 0) delete msg.reactions[cleanEmoji];
     io.emit('chat:updated', msg);
   });
 
-    socket.emit('chat:history', Store.chatHistory);
-    broadcastRoster();
-  } catch (e) {}
-});
-  socket.on('chat:send', (text) => {
-  const p = Store.players.get(socket.id); if(!p) return;
-  const msg = { user: normProfile(p), text: sanitizeText(text, 200), time: Date.now() };
-  Store.chatHistory.push(msg); if(Store.chatHistory.length > 50) Store.chatHistory.shift();
-  io.emit('chat:message', msg);
-});
-
-  
-
-  // FIXED: Using room:enter to match the new Lobby
+  // --- ROOM & MATCHMAKING LOGIC ---
   socket.on('room:enter', ({ gameId, mode, code }) => {
     const p = Store.players.get(socket.id); if(!p || !Store.queues[gameId]) return;
 
@@ -217,26 +210,40 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('match:cancel', () => { Object.values(Store.queues).forEach(q => { const i = q.findIndex(x => x.socketId === socket.id); if(i!==-1) q.splice(i,1); }); });
+  socket.on('match:cancel', () => { 
+    Object.values(Store.queues).forEach(q => { 
+      const i = q.findIndex(x => x.socketId === socket.id); 
+      if(i!==-1) q.splice(i,1); 
+    }); 
+  });
 
   socket.on('invite:send', ({ toUserId, gameId }) => {
-    const p1 = Store.players.get(socket.id); const p2 = Array.from(Store.players.values()).find(x => x.userId === toUserId);
+    const p1 = Store.players.get(socket.id); 
+    const p2 = Array.from(Store.players.values()).find(x => x.userId === toUserId);
     if(p2) io.to(p2.socketId).emit('invite:receive', { from: { id: p1.userId, name: p1.name }, gameId, inviteId: p1.userId });
   });
   
   socket.on('invite:accept', ({ fromUserId, gameId }) => {
-    const p1 = Array.from(Store.players.values()).find(x => x.userId === fromUserId); if(!p1) return;
+    const p1 = Array.from(Store.players.values()).find(x => x.userId === fromUserId); 
+    if(!p1) return;
     const code = generateRoomCode();
     Store.rooms.set(code, { id: code, type: 'friend', gameId, players: [], status: 'waiting', createdAt: Date.now() });
-    socket.emit('match:found', { room: code, gameId }); io.to(p1.socketId).emit('match:found', { room: code, gameId });
+    socket.emit('match:found', { room: code, gameId }); 
+    io.to(p1.socketId).emit('match:found', { room: code, gameId });
   });
 
   socket.on('game:ready', ({ roomId }) => {
-    const p = Store.players.get(socket.id); const room = Store.rooms.get(roomId);
+    const p = Store.players.get(socket.id); 
+    const room = Store.rooms.get(roomId);
     if(!p || !room || room.status !== 'waiting') return;
+    
     socket.join(roomId);
     let rp = room.players.find(x => x.userId === p.userId);
-    if(!rp) { if(room.players.length >= 2) return; rp = { socketId: socket.id, userId: p.userId, ready: true, profile: { name: p.name, avatar: p.avatar, gender: p.gender, avatarType: p.avatarType } }; room.players.push(rp); }
+    if(!rp) { 
+      if(room.players.length >= 2) return; 
+      rp = { socketId: socket.id, userId: p.userId, ready: true, profile: { name: p.name, avatar: p.avatar, gender: p.gender, avatarType: p.avatarType } }; 
+      room.players.push(rp); 
+    }
     else { rp.socketId = socket.id; rp.ready = true; }
 
     if(room.players.length === 2 && room.players.every(x => x.ready)) {
@@ -244,20 +251,26 @@ io.on('connection', (socket) => {
       const startAt = Date.now() + 3000;
       const profiles = room.players.map(x => ({ userId: x.userId, profile: x.profile }));
       broadcastRoster();
+      
       if (room.gameId === 'chess') {
-        if(!room.chess) { room.chess = new Chess(); room.players[0].color = 'w'; room.players[1].color = 'b'; }
+        if(!room.chess) { 
+          room.chess = new Chess(); 
+          room.players[0].color = 'w'; 
+          room.players[1].color = 'b'; 
+        }
         profiles.forEach(pr => pr.color = room.players.find(x=>x.userId===pr.userId).color);
         
-        // FIXED: 3 minutes + 5 seconds increment + token generation
         room.clocks = room.clocks || { w: 180000, b: 180000 };
         room.lastMoveTime = startAt;
         room.players.forEach(pr => pr.token = crypto.randomUUID());
-        const myToken = room.players.find(x => x.userId === p.userId).token;
 
-        io.to(room.id).emit('match:start', { 
-          startAt, profiles, serverNow: Date.now(), gameId: 'chess', 
-          fen: room.chess.fen(), clocks: room.clocks, history: [], 
-          matchId: room.id, token: myToken 
+        // FIX: Send 'match:start' individually so each player gets their own token
+        room.players.forEach(pl => {
+          io.to(pl.socketId).emit('match:start', { 
+            startAt, profiles, serverNow: Date.now(), gameId: 'chess', 
+            fen: room.chess.fen(), clocks: room.clocks, history: [], 
+            matchId: room.id, token: pl.token 
+          });
         });
 
         room.endTimer = setInterval(() => {
@@ -265,23 +278,26 @@ io.on('connection', (socket) => {
           const elapsed = Date.now() - room.lastMoveTime; const turn = room.chess.turn();
           if(room.clocks[turn] - elapsed <= 0) { room.clocks[turn]=0; endChess(room, turn==='w'?'b':'w', 'timeout'); }
         }, 1000);
-      } 
-      else if (room.gameId === 'swipe') {
+
+      } else if (room.gameId === 'swipe') {
         room.endTime = startAt + 30000;
-        room.players.forEach(pl => { pl.score = 0; pl.combo = 0; pl.bestCombo = 0; pl.hits = 0; pl.misses = 0; pl.reactions = []; pl.target = DIRS[Math.floor(Math.random()*4)]; pl.targetIssuedAt = startAt; pl.lockUntil = 0; });
+        room.players.forEach(pl => { 
+          pl.score = 0; pl.combo = 0; pl.bestCombo = 0; pl.hits = 0; pl.misses = 0; 
+          pl.reactions = []; pl.target = DIRS[Math.floor(Math.random()*4)]; pl.targetIssuedAt = startAt; pl.lockUntil = 0; 
+        });
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'swipe' });
         room.players.forEach(pl => io.to(pl.socketId).emit('game:target', { dir: pl.target }));
         room.endTimer = setTimeout(() => endSwipeMatch(room), 33500);
-      }
-      else if (room.gameId === 'ludo' || room.gameId === 'snake') {
+
+      } else if (room.gameId === 'ludo' || room.gameId === 'snake') {
         room.turn = room.players[0].userId;
         room.afkMisses = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
         if(room.gameId === 'ludo') room.positions = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
         else if(room.gameId === 'snake') room.positions = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: room.gameId });
         startTurnTimer(room);
-      }
-      else if (room.gameId === 'word') {
+
+      } else if (room.gameId === 'word') {
         room.scores = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
         room.currentWord = WORDS[Math.floor(Math.random()*WORDS.length)];
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'word' });
@@ -375,7 +391,6 @@ io.on('connection', (socket) => {
       const res = room.chess.move(move);
       if(res) {
         const now = Date.now(); 
-        // FIXED: Added + 5000ms increment and history
         room.clocks[p.color] = Math.max(0, room.clocks[p.color] - (now - room.lastMoveTime)) + 5000;
         room.lastMoveTime = now;
         
@@ -393,47 +408,82 @@ io.on('connection', (socket) => {
     } catch(e) {}
   });
 
+  socket.on('chess:resign', () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== 'playing' || room.gameId !== 'chess') return;
+    const p = room.players.find(x => x.socketId === socket.id);
+    if (!p) return;
+    const winnerColor = p.color === 'w' ? 'b' : 'w';
+    // FIX: p.profile.name instead of p.name
+    endChess(room, winnerColor, `${p.profile?.name || 'Opponent'} resigned`);
+  });
+
+  socket.on('match:rematch', () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== 'ended') return;
+    const p = room.players.find(x => x.socketId === socket.id);
+    if (!p) return;
+
+    if (!room.rematchVotes) room.rematchVotes = new Set();
+    room.rematchVotes.add(p.userId);
+
+    if (room.rematchVotes.size >= 2) {
+      room.rematchVotes.clear();
+      room.status = 'waiting';
+      room.chess = null;
+      room.clocks = null;
+      if (room.players.length === 2) {
+        const c0 = room.players[0].color;
+        room.players[0].color = room.players[1].color;
+        room.players[1].color = c0;
+      }
+      room.players.forEach(pl => pl.ready = false);
+      io.to(room.id).emit('match:rematch_start');
+    } else {
+      socket.emit('match:rematch_wait');
+      const opp = room.players.find(x => x.userId !== p.userId);
+      if (opp) io.to(opp.socketId).emit('error:toast', 'Opponent wants a rematch!');
+    }
+
+  });
+
   function endSwipeMatch(room) {
-  if (room.status === 'ended') return;
-  room.status = 'ended'; clearTimeout(room.endTimer);
+    if (room.status === 'ended') return;
+    room.status = 'ended'; clearTimeout(room.endTimer);
 
-  const results = room.players.map(p => ({
-    userId: p.userId, score: p.score, bestCombo: p.bestCombo,
-    hits: p.hits, misses: p.misses,
-    avgReaction: p.reactions.length ? Math.round(p.reactions.reduce((a, b) => a + b, 0) / p.reactions.length) : 0
-  }));
+    const results = room.players.map(p => ({
+      userId: p.userId, score: p.score, bestCombo: p.bestCombo,
+      hits: p.hits, misses: p.misses,
+      avgReaction: p.reactions.length ? Math.round(p.reactions.reduce((a, b) => a + b, 0) / p.reactions.length) : 0
+    }));
 
-  room.players.forEach((p, i) => {
-    const live = Store.players.get(p.socketId);
-    recordSwipeScore(normProfile(live || { userId: p.userId, name: p.profile?.name, ...p.profile }), results[i].score);
-  });
+    room.players.forEach((p, i) => {
+      const live = Store.players.get(p.socketId);
+      recordSwipeScore(normProfile(live || { userId: p.userId, name: p.profile?.name, ...p.profile }), results[i].score);
+    });
 
-  let winnerId = null;
-  if (results.length === 2 && results[0].score !== results[1].score) {
-    winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
-  }
-  io.to(room.id).emit('match:end', { results, winnerId });
-}
-
-  room.players.forEach((p, i) => {
-    const live = Store.players.get(p.socketId);
-    recordSwipeScore(normProfile(live || { userId: p.userId, name: p.profile?.name, ...p.profile }), results[i].score);
-  });
-
-  let winnerId = null;
-  if (results.length === 2 && results[0].score !== results[1].score) {
-    winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
-  }
-  io.to(room.id).emit('match:end', { results, winnerId });
-}
-    let winnerId = null; if (results.length === 2 && results[0].score !== results[1].score) winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
+    let winnerId = null;
+    if (results.length === 2 && results[0].score !== results[1].score) {
+      winnerId = results[0].score > results[1].score ? results[0].userId : results[1].userId;
+    }
     io.to(room.id).emit('match:end', { results, winnerId });
+    setTimeout(() => Store.rooms.delete(room.id), 300000);
+    room.players.forEach(p => {
+      const s = io.sockets.sockets.get(p.socketId);
+      if (s) s.leave(room.id);
+    });
   }
 
   function endChess(room, winColor, reason) {
     room.status = 'ended'; clearInterval(room.endTimer);
     const winner = room.players.find(p => p.color === winColor);
     io.to(room.id).emit('match:end', { winnerId: winner ? winner.userId : null, reason });
+    setTimeout(() => Store.rooms.delete(room.id), 300000);
+        // Inside endChess()
+    room.players.forEach(p => {
+      const s = io.sockets.sockets.get(p.socketId);
+      if (s) s.leave(room.id);
+    });
   }
 
   function endWord(room) {
@@ -443,16 +493,28 @@ io.on('connection', (socket) => {
     if (room.scores[p1] > room.scores[p2]) winner = p1;
     else if (room.scores[p2] > room.scores[p1]) winner = p2;
     io.to(room.id).emit('word:state', { myScore: room.scores[p1], oppScore: room.scores[p2], winner });
+    setTimeout(() => Store.rooms.delete(room.id), 300000);
+    room.players.forEach(p => {
+      const s = io.sockets.sockets.get(p.socketId);
+      if (s) s.leave(room.id);
+    });
   }
 
   socket.on('game:chat', (text) => {
-    const room = getRoomForSocket(socket.id); const p = Store.players.get(socket.id);
+    const room = getRoomForSocket(socket.id); 
+    const p = Store.players.get(socket.id);
     if(room && p) io.to(room.id).emit('game:chat_receive', { senderId: p.userId, name: p.name, text: sanitizeText(text, 150) });
   });
 
   socket.on('disconnect', () => {
-    Object.values(Store.queues).forEach(q => { const i = q.findIndex(x=>x.socketId===socket.id); if(i!==-1) q.splice(i,1); });
-    const room = getRoomForSocket(socket.id); const p = Store.players.get(socket.id);
+    Object.values(Store.queues).forEach(q => { 
+      const i = q.findIndex(x=>x.socketId===socket.id); 
+      if(i!==-1) q.splice(i,1); 
+    });
+    
+    const room = getRoomForSocket(socket.id); 
+    const p = Store.players.get(socket.id);
+    
     if(room && p && room.status === 'playing') {
       const opp = room.players.find(x => x.userId !== p.userId);
       if(opp) {
