@@ -318,6 +318,19 @@ io.on('connection', (socket) => {
         room.picks = {};
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'rps' });
       }
+      else if (room.gameId === 'ludo') {
+        if (room.mode === 'random' && room.players.length >= 2) {
+          startLudoRoom(room);
+        } else {
+          room.players.forEach((pl, idx) => {
+            io.to(pl.socketId).emit('ludo:lobby', {
+              count: room.players.length,
+              isHost: idx === 0
+            });
+          });
+          if (room.players.length >= 4) startLudoRoom(room);
+        }
+      }
     }
   });
 
