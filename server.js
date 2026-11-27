@@ -422,6 +422,96 @@ io.on('connection', (socket) => {
       room.picks = {};
     }
   });
+  // --- LUDO ONLINE (Random 2P & Custom 2-4P) ---
+  function startLudoRoom(room) {
+    const colors = room.players.length === 2 ? [0, 2] : room.players.length === 3 ? [0, 1, 2] : [0, 1, 2, 3];
+    room.status = 'playing';
+    room.ludo = {
+      turnIdx: 0,
+      dice: 0,
+      sixStreak: 0,
+      players: room.players.map((pl, i) => ({
+        userId: pl.userId, name: pl.name, color: colors[i], tokens: [-1, -1, -1, -1]
+      }))
+    };
+    io.to(room.id).emit('match:start', { players: room.ludo.players, gameId: 'ludo' });
+  }
+
+  socket.on('ludo:start_custom', () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.gameId !== 'ludo' || room.status === 'playing' || room.players.length < 2) return;
+    startLudoRoom(room);
+  });
+
+  socket.on('ludo:roll', () => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (!room || !p || !room.ludo || room.status !== 'playing') return;
+    const L = room.ludo;
+    const cur = L.players[L.turnIdx];
+    if (cur.userId !== p.userId || L.dice !== 0) return;
+
+    const roll = Math.floor(Math.random() * 6) + 1;
+    const movable = [];
+    cur.tokens.forEach((s, i) => { if ((s === -1 && roll === 6) || (s >= 0 && s + roll <= 56)) movable.push(i); });
+
+    if (roll === 6) L.sixStreak++; else L.sixStreak = 0;
+    const skipped = (L.sixStreak === 3) || movable.length === 0;
+
+    if (skipped) {
+      L.sixStreak = 0;
+      L.dice = 0;
+      io.to(room.id).emit('ludo:rolled', { turnIdx: L.turnIdx, roll, movable: [], skipped: true });
+      L.turnIdx = (L.turnIdx + 1) % L.players.length;
+      setTimeout(() => io.to(room.id).emit('ludo:moved', { playerIdx: L.turnIdx, tokenIdx: 0, roll: 0, nextTurnIdx: L.turnIdx }), 800);
+    } else {
+      L.dice = roll;
+      io.to(room.id).emit('ludo:rolled', { turnIdx: L.turnIdx, roll, movable, skipped: false });
+    }
+  });
+
+  socket.on('ludo:move', ({ tokenIdx }) => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (!room || !p || !room.ludo || room.status !== 'playing') return;
+    const L = room.ludo;
+    const cur = L.players[L.turnIdx];
+    if (cur.userId !== p.userId || L.dice === 0) return;
+
+    const roll = L.dice;
+    const step = cur.tokens[tokenIdx];
+    if (step === -1 && roll !== 6) return;
+    if (step >= 0 && step + roll > 56) return;
+
+    const nextStep = step === -1 ? 0 : step + roll;
+    cur.tokens[tokenIdx] = nextStep;
+    let bonus = (roll === 6 || nextStep === 56);
+
+    const START = [39, 0, 13, 26];
+    const SAFE = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
+    if (nextStep <= 50) {
+      const gIdx = (START[cur.color] + nextStep) % 52;
+      if (!SAFE.has(gIdx)) {
+        L.players.forEach(opp => {
+          if (opp.color === cur.color) return;
+          opp.tokens.forEach((os, oti) => {
+            if (os >= 0 && os <= 50 && (START[opp.color] + os) % 52 === gIdx) {
+              opp.tokens[oti] = -1;
+              bonus = true;
+            }
+          });
+        });
+      }
+    }
+
+    const won = cur.tokens.every(t => t === 56);
+    if (won) room.status = 'ended';
+
+    const movedIdx = L.turnIdx;
+    L.dice = 0;
+    if (!bonus) { L.turnIdx = (L.turnIdx + 1) % L.players.length; L.sixStreak = 0; }
+    io.to(room.id).emit('ludo:moved', { playerIdx: movedIdx, tokenIdx, roll, nextTurnIdx: L.turnIdx, winnerName: won ? cur.name : null });
+  });
 
   socket.on('chess:move', (move) => {
     const room = getRoomForSocket(socket.id); if(!room || room.status !== 'playing' || room.gameId !== 'chess') return;
