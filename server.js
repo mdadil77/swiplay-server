@@ -313,6 +313,11 @@ io.on('connection', (socket) => {
         setTimeout(() => { io.to(room.id).emit('word:next', room.currentWord); }, 3000);
         room.endTimer = setTimeout(() => endWord(room), 63000);
       }
+      else if (room.gameId === 'rps') {
+        room.scores = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
+        room.picks = {};
+        io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'rps' });
+      }
     }
   });
 
