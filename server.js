@@ -199,7 +199,7 @@ io.on('connection', (socket) => {
       if (oppIdx !== -1) {
         const opp = q.splice(oppIdx, 1)[0];
         const roomCode = generateRoomCode();
-        Store.rooms.set(roomCode, { id: roomCode, gameId, players: [], status: 'waiting', createdAt: Date.now() });
+        Store.rooms.set(roomCode, { id: roomCode, mode: 'random', gameId, players: [], status: 'waiting', createdAt: Date.now() });
         socket.emit('match:found', { room: roomCode, gameId });
         io.to(opp.socketId).emit('match:found', { room: roomCode, gameId });
       } else { 
@@ -209,11 +209,12 @@ io.on('connection', (socket) => {
       if (code) {
         const room = Store.rooms.get(code.toUpperCase());
         if(!room || room.gameId !== gameId) return socket.emit('error:toast', "Room not found");
-        if(room.players.length >= 2) return socket.emit('error:toast', "Room is full");
+        const maxP = (room.gameId === 'ludo' && room.mode === 'code') ? 4 : 2;
+        if(room.players.length >= maxP) return socket.emit('error:toast', "Room is full");
         socket.emit('match:found', { room: room.id, gameId: room.gameId });
       } else {
         const newCode = generateRoomCode();
-        Store.rooms.set(newCode, { id: newCode, type: 'friend', gameId, players: [], status: 'waiting', createdAt: Date.now() });
+        Store.rooms.set(newCode, { id: newCode, mode: 'code', type: 'friend', gameId, players: [], status: 'waiting', createdAt: Date.now() });
         socket.emit('room:created', newCode);
       }
     }
@@ -240,20 +241,33 @@ io.on('connection', (socket) => {
     socket.emit('match:found', { room: code, gameId }); 
     io.to(p1.socketId).emit('match:found', { room: code, gameId });
   });
-
   socket.on('game:ready', ({ roomId }) => {
     const p = Store.players.get(socket.id); 
     const room = Store.rooms.get(roomId);
     if(!p || !room || room.status !== 'waiting') return;
     
     socket.join(roomId);
+    const maxP = (room.gameId === 'ludo' && room.mode === 'code') ? 4 : 2;
     let rp = room.players.find(x => x.userId === p.userId);
     if(!rp) { 
-      if(room.players.length >= 2) return; 
+      if(room.players.length >= maxP) return; 
       rp = { socketId: socket.id, userId: p.userId, ready: true, profile: { name: p.name, avatar: p.avatar, gender: p.gender, avatarType: p.avatarType } }; 
       room.players.push(rp); 
     }
     else { rp.socketId = socket.id; rp.ready = true; }
+
+    // Handle Ludo (Random 2P & Custom 2-4P)
+    if (room.gameId === 'ludo') {
+      if (room.mode === 'random' && room.players.length >= 2 && room.players.every(x => x.ready)) {
+        startLudoRoom(room);
+      } else if (room.mode === 'code') {
+        room.players.forEach((pl, idx) => {
+          io.to(pl.socketId).emit('ludo:lobby', { count: room.players.length, isHost: idx === 0 });
+        });
+        if (room.players.length >= 4 && room.players.every(x => x.ready)) startLudoRoom(room);
+      }
+      return;
+    }
 
     if(room.players.length === 2 && room.players.every(x => x.ready)) {
       room.status = 'playing';
@@ -273,7 +287,6 @@ io.on('connection', (socket) => {
         room.lastMoveTime = startAt;
         room.players.forEach(pr => pr.token = crypto.randomUUID());
 
-        // FIX: Send 'match:start' individually so each player gets their own token
         room.players.forEach(pl => {
           io.to(pl.socketId).emit('match:start', { 
             startAt, profiles, serverNow: Date.now(), gameId: 'chess', 
@@ -298,12 +311,11 @@ io.on('connection', (socket) => {
         room.players.forEach(pl => io.to(pl.socketId).emit('game:target', { dir: pl.target }));
         room.endTimer = setTimeout(() => endSwipeMatch(room), 33500);
 
-      } else if (room.gameId === 'ludo' || room.gameId === 'snake') {
+      } else if (room.gameId === 'snake') {
         room.turn = room.players[0].userId;
         room.afkMisses = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
-        if(room.gameId === 'ludo') room.positions = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
-        else if(room.gameId === 'snake') room.positions = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
-        io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: room.gameId });
+        room.positions = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
+        io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'snake' });
         startTurnTimer(room);
 
       } else if (room.gameId === 'word') {
@@ -312,27 +324,16 @@ io.on('connection', (socket) => {
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'word' });
         setTimeout(() => { io.to(room.id).emit('word:next', room.currentWord); }, 3000);
         room.endTimer = setTimeout(() => endWord(room), 63000);
-      }
-      else if (room.gameId === 'rps') {
+
+      } else if (room.gameId === 'rps') {
         room.scores = { [room.players[0].userId]: 0, [room.players[1].userId]: 0 };
         room.picks = {};
         io.to(room.id).emit('match:start', { startAt, profiles, serverNow: Date.now(), gameId: 'rps' });
       }
-      else if (room.gameId === 'ludo') {
-        if (room.mode === 'random' && room.players.length >= 2) {
-          startLudoRoom(room);
-        } else {
-          room.players.forEach((pl, idx) => {
-            io.to(pl.socketId).emit('ludo:lobby', {
-              count: room.players.length,
-              isHost: idx === 0
-            });
-          });
-          if (room.players.length >= 4) startLudoRoom(room);
-        }
-      }
     }
   });
+
+  
 
   socket.on('game:swipe', ({ dir }) => {
     try {
@@ -369,7 +370,7 @@ io.on('connection', (socket) => {
     }, 15000); 
   }
 
-  socket.on('ludo:roll', () => { const r = getRoomForSocket(socket.id); if(r && r.gameId==='ludo') handleRoll(r, Store.players.get(socket.id).userId); });
+  
   socket.on('snake:roll', () => { const r = getRoomForSocket(socket.id); if(r && r.gameId==='snake') handleRoll(r, Store.players.get(socket.id).userId); });
 
   function handleRoll(room, userId) {
@@ -444,7 +445,7 @@ io.on('connection', (socket) => {
       dice: 0,
       sixStreak: 0,
       players: room.players.map((pl, i) => ({
-        userId: pl.userId, name: pl.name, color: colors[i], tokens: [-1, -1, -1, -1]
+        userId: pl.userId, name: pl.profile?.name || 'Player', color: colors[i], tokens: [-1, -1, -1, -1]
       }))
     };
     io.to(room.id).emit('match:start', { players: room.ludo.players, gameId: 'ludo' });
