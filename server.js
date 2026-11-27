@@ -397,6 +397,31 @@ io.on('connection', (socket) => {
       io.to(room.id).emit('word:next', room.currentWord);
     }
   });
+  socket.on('rps:pick', ({ move }) => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (!room || !p || room.gameId !== 'rps' || room.status !== 'playing') return;
+    if (!['rock', 'paper', 'scissors'].includes(move)) return;
+
+    room.picks[p.userId] = move;
+    const [p1, p2] = room.players.map(x => x.userId);
+    if (room.picks[p1] && room.picks[p2]) {
+      const m1 = room.picks[p1], m2 = room.picks[p2];
+      if ((m1 === 'rock' && m2 === 'scissors') || (m1 === 'paper' && m2 === 'rock') || (m1 === 'scissors' && m2 === 'paper')) {
+        room.scores[p1]++;
+      } else if (m1 !== m2) {
+        room.scores[p2]++;
+      }
+
+      let winner = null;
+      if (room.scores[p1] >= 3) winner = p1;
+      else if (room.scores[p2] >= 3) winner = p2;
+      if (winner) room.status = 'ended';
+
+      io.to(room.id).emit('rps:result', { moves: { ...room.picks }, scores: { ...room.scores }, winner });
+      room.picks = {};
+    }
+  });
 
   socket.on('chess:move', (move) => {
     const room = getRoomForSocket(socket.id); if(!room || room.status !== 'playing' || room.gameId !== 'chess') return;
