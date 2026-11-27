@@ -516,6 +516,7 @@ io.on('connection', (socket) => {
           });
         });
       }
+      startLudoTurnTimer(room);
     }
 
     const won = cur.tokens.every(t => t === 56);
@@ -526,6 +527,53 @@ io.on('connection', (socket) => {
     if (!bonus) { L.turnIdx = (L.turnIdx + 1) % L.players.length; L.sixStreak = 0; }
     io.to(room.id).emit('ludo:moved', { playerIdx: movedIdx, tokenIdx, roll, nextTurnIdx: L.turnIdx, winnerName: won ? cur.name : null });
   });
+  function startLudoTurnTimer(room) {
+    clearTimeout(room.ludoTimer);
+    if (!room.ludo || room.status !== 'playing') return;
+    room.ludoTimer = setTimeout(() => {
+      if (!room.ludo || room.status !== 'playing') return;
+      const L = room.ludo;
+      const cur = L.players[L.turnIdx];
+      cur.misses = (cur.misses || 0) + 1;
+      if (cur.misses >= 3) {
+        eliminateLudoPlayer(room, cur.userId, 'timed out (offline)');
+      } else {
+        L.dice = 0; L.sixStreak = 0;
+        do { L.turnIdx = (L.turnIdx + 1) % L.players.length; } while (L.players[L.turnIdx].out);
+        io.to(room.id).emit('ludo:moved', { playerIdx: L.turnIdx, tokenIdx: 0, roll: 0, nextTurnIdx: L.turnIdx });
+        startLudoTurnTimer(room);
+      }
+    }, 15000);
+  }
+
+  function eliminateLudoPlayer(room, userId, reason) {
+    if (!room.ludo || room.status !== 'playing') return;
+    const L = room.ludo;
+    const pl = L.players.find(x => x.userId === userId);
+    if (!pl || pl.out) return;
+    pl.out = true;
+
+    const alive = L.players.filter(x => !x.out);
+    if (alive.length <= 1) {
+      room.status = 'ended';
+      clearTimeout(room.ludoTimer);
+      io.to(room.id).emit('ludo:player_out', { userId, reason, winnerName: alive[0]?.name || 'Opponent' });
+    } else {
+      if (L.players[L.turnIdx].userId === userId) {
+        L.dice = 0; L.sixStreak = 0;
+        do { L.turnIdx = (L.turnIdx + 1) % L.players.length; } while (L.players[L.turnIdx].out);
+      }
+      io.to(room.id).emit('ludo:player_out', { userId, reason, nextTurnIdx: L.turnIdx });
+      startLudoTurnTimer(room);
+    }
+  }
+
+  socket.on('ludo:resign', () => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (room && p && room.gameId === 'ludo') eliminateLudoPlayer(room, p.userId, 'resigned');
+  });
+  
 
   socket.on('chess:move', (move) => {
     const room = getRoomForSocket(socket.id); if(!room || room.status !== 'playing' || room.gameId !== 'chess') return;
@@ -650,10 +698,53 @@ io.on('connection', (socket) => {
     });
   }
 
-  socket.on('game:chat', (text) => {
-    const room = getRoomForSocket(socket.id); 
+  socket.on('game:chat', (payload) => {
+    const room = getRoomForSocket(socket.id);
     const p = Store.players.get(socket.id);
-    if(room && p) io.to(room.id).emit('game:chat_receive', { senderId: p.userId, name: p.name, text: sanitizeText(text, 150) });
+    if (!room || !p) return;
+    if (!room.chat) room.chat = [];
+
+    const rawText = typeof payload === 'string' ? payload : payload?.text;
+    const text = sanitizeText(rawText, 150);
+    if (!text) return;
+
+    let replyTo = null;
+    if (payload && typeof payload === 'object' && payload.replyToId) {
+      const target = room.chat.find(m => m.id === payload.replyToId);
+      if (target) replyTo = { id: target.id, name: target.name, text: target.text.substring(0, 50) };
+    }
+
+    const msg = { id: crypto.randomUUID(), senderId: p.userId, name: p.name, text, time: Date.now(), edited: false, replyTo, reactions: {} };
+    room.chat.push(msg);
+    if (room.chat.length > 50) room.chat.shift();
+    io.to(room.id).emit('game:chat_receive', msg);
+  });
+
+  socket.on('game:chat_edit', ({ id, text }) => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (!room || !p || !room.chat) return;
+    const msg = room.chat.find(m => m.id === id);
+    if (!msg || msg.senderId !== p.userId) return;
+    if (Date.now() - msg.time > 300000) return socket.emit('error:toast', 'Messages can only be edited within 5 minutes.');
+    const clean = sanitizeText(text, 150);
+    if (!clean) return;
+    msg.text = clean; msg.edited = true;
+    io.to(room.id).emit('game:chat_updated', msg);
+  });
+
+  socket.on('game:chat_react', ({ id, emoji }) => {
+    const room = getRoomForSocket(socket.id);
+    const p = Store.players.get(socket.id);
+    if (!room || !p || !room.chat || !emoji) return;
+    const msg = room.chat.find(m => m.id === id);
+    if (!msg) return;
+    const em = String(emoji).substring(0, 4);
+    if (!msg.reactions[em]) msg.reactions[em] = [];
+    const idx = msg.reactions[em].indexOf(p.userId);
+    if (idx === -1) msg.reactions[em].push(p.userId); else msg.reactions[em].splice(idx, 1);
+    if (msg.reactions[em].length === 0) delete msg.reactions[em];
+    io.to(room.id).emit('game:chat_updated', msg);
   });
 
   socket.on('disconnect', () => {
@@ -671,7 +762,7 @@ io.on('connection', (socket) => {
         io.to(room.id).emit('error:toast', "Opponent disconnected. You win.");
         if (room.gameId === 'chess') endChess(room, opp.color, 'disconnect');
         else if(room.gameId === 'swipe') endSwipeMatch(room);
-        else if(room.gameId === 'ludo' || room.gameId === 'snake') io.to(room.id).emit(`${room.gameId}:state`, { myPos: 0, oppPos: 0, winner: opp.userId });
+        else if (room.gameId === 'ludo') eliminateLudoPlayer(room, p.userId, 'disconnected');
         else if(room.gameId === 'word') io.to(room.id).emit('word:state', { myScore: 0, oppScore: 0, winner: opp.userId });
       }
     }
